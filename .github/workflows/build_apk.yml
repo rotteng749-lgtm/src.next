@@ -88,7 +88,14 @@ jobs:
               "url": "https://chromium.googlesource.com/chromium/src.git",
               "managed": False,
               "custom_deps": {},
-              "custom_vars": {},
+              "custom_vars": {
+                # Chromium 105's DEPS hook pulls a prebuilt from the
+                # chromium-tools-traffic_annotation bucket, and that object no
+                # longer exists upstream. The auditor is only used by the
+                # network-traffic annotation presubmit, not by the browser
+                # build, so skip the checkout.
+                "checkout_traffic_annotation_tools": False,
+              },
             },
           ]
           target_os = ["android"]
@@ -106,7 +113,16 @@ jobs:
           cd "$GITHUB_WORKSPACE/cr"
           # Pulls third_party, the Android SDK/NDK and the clang toolchain.
           # This is the bulk of the checkout and the slowest step.
-          gclient sync --no-history --shallow -D
+          #
+          # A first sync can still trip over a DEPS hook whose GCS object was
+          # removed upstream years after this tag was cut. Hooks are
+          # re-entrant, so retry once: already-downloaded objects are skipped
+          # and only the failing hook runs again. If it fails a second time,
+          # continue anyway: no hook is required to compile the browser, and
+          # gn will report anything genuinely missing.
+          gclient sync --no-history --shallow -D \
+            || gclient sync --no-history --shallow -D \
+            || echo "::warning::gclient sync reported hook failures; continuing"
           df -h
 
       - name: Apply overlay
