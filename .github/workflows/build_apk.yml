@@ -48,20 +48,22 @@ jobs:
             libgbm-dev libpango1.0-dev libcairo2-dev libasound2-dev \
             libxshmfence-dev || true
 
-      - name: Read Chromium version
-        id: version
-        run: |
-          set -eux
-          # shellcheck disable=SC1091
-          source CHROMIUM_VERSION
-          TAG="${CHROMIUM_MAJOR}.${CHROMIUM_MINOR}.${CHROMIUM_BUILD}.${CHROMIUM_PATCH}"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "Building against Chromium ${TAG}"
-
       - name: Checkout overlay
         uses: actions/checkout@v4
         with:
           path: overlay
+
+      - name: Read Chromium version
+        id: version
+        run: |
+          set -eux
+          # The checkout lands in overlay/, so the version file is not at the
+          # runner's working directory root.
+          # shellcheck disable=SC1091
+          source overlay/CHROMIUM_VERSION
+          TAG="${CHROMIUM_MAJOR}.${CHROMIUM_MINOR}.${CHROMIUM_BUILD}.${CHROMIUM_PATCH}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Building against Chromium ${TAG}"
 
       - name: Fetch Chromium source
         run: |
