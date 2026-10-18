@@ -5,11 +5,11 @@
 # compile to http://longbuild.find.kiwi, which stopped resolving after Kiwi was
 # archived. This workflow does the build itself.
 #
-# It checks out upstream Chromium at the tag recorded in CHROMIUM_VERSION, then
-# copies this repository over that tree so the overlay files win, then runs
-# gn + ninja. Only arm64 is built: a full Chromium Android build takes several
-# hours and the GitHub-hosted runner has a 6 hour job limit, so one ABI is the
-# most that fits.
+# It creates a gclient workspace pinned to the tag in CHROMIUM_VERSION, syncs
+# the Android dependencies, copies this repository over the Chromium tree so
+# the overlay files win, then runs gn + ninja. Only arm64 is built: a full
+# Chromium Android build takes several hours and the hosted runner has a 6 hour
+# job limit, so one ABI is the most that fits.
 name: 'Build panxcz-browser APK'
 
 on:
@@ -30,7 +30,7 @@ jobs:
           set -eux
           sudo swapoff -a || true
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-            /usr/local/.ghcup /opt/hostedtoolcache
+            /usr/local/.ghcup /opt/hostedtoolcache /usr/share/swift
           sudo apt-get clean
           df -h
 
@@ -40,16 +40,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             git python3 python-is-python3 curl unzip rsync ccache \
-            openjdk-17-jdk-headless pkg-config lsb-release sudo
-          sudo apt-get install -y --no-install-recommends \
+            openjdk-11-jdk-headless pkg-config lsb-release sudo \
             libglib2.0-dev libnss3-dev libnspr4-dev libdbus-1-dev \
             libatk1.0-dev libatk-bridge2.0-dev libcups2-dev libdrm-dev \
             libxkbcommon-dev libxcomposite-dev libxdamage-dev libxrandr-dev \
             libgbm-dev libpango1.0-dev libcairo2-dev libasound2-dev \
-            libxshmfence-dev || true
+            libxshmfence-dev
+          # Chromium 105 predates JDK 17 support; pin JDK 11 for the Android
+          # gradle step.
+          sudo update-alternatives --set java \
+            /usr/lib/jvm/java-11-openjdk-amd64/bin/java
+          java -version
 
       - name: Checkout overlay
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           path: overlay
 
@@ -65,53 +69,88 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "Building against Chromium ${TAG}"
 
-      - name: Fetch Chromium source
+      - name: Set up depot_tools
         run: |
           set -eux
+          git clone --depth 1 \
+            https://chromium.googlesource.com/chromium/tools/depot_tools.git \
+            "$GITHUB_WORKSPACE/depot_tools"
+          echo "$GITHUB_WORKSPACE/depot_tools" >> "$GITHUB_PATH"
+
+      - name: Configure gclient workspace
+        run: |
+          set -eux
+          mkdir -p "$GITHUB_WORKSPACE/cr"
+          cat > "$GITHUB_WORKSPACE/cr/.gclient" <<'EOF'
+          solutions = [
+            {
+              "name": "src",
+              "url": "https://chromium.googlesource.com/chromium/src.git",
+              "managed": False,
+              "custom_deps": {},
+              "custom_vars": {},
+            },
+          ]
+          target_os = ["android"]
+          EOF
+          # gclient reads the pinned revision from the solution checkout, so
+          # put src on the exact tag before syncing.
+          cd "$GITHUB_WORKSPACE/cr"
           git clone --depth 1 --branch "${{ steps.version.outputs.tag }}" \
-            https://chromium.googlesource.com/chromium/src.git chromium
+            https://chromium.googlesource.com/chromium/src.git src
 
       - name: Sync Chromium dependencies
         run: |
           set -eux
-          cd chromium
-          # Fetch depot_tools, which provides gclient.
-          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git ../depot_tools
-          export PATH="$PWD/../depot_tools:$PATH"
-          # gclient reads DEPS and pulls every third_party dependency, the
-          # sysroot and the toolchain. This is the bulk of the checkout.
+          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
+          cd "$GITHUB_WORKSPACE/cr"
+          # Pulls third_party, the Android SDK/NDK and the clang toolchain.
+          # This is the bulk of the checkout and the slowest step.
           gclient sync --no-history --shallow -D
+          df -h
 
       - name: Apply overlay
         run: |
           set -eux
-          # Copy the overlay on top of upstream. Files present in both trees
-          # are replaced by the overlay version. VCS metadata is excluded so
-          # the chromium checkout stays intact.
-          rsync -a --exclude '.git' --exclude '.github' overlay/ chromium/
+          # Merge the overlay into the Chromium tree. Files present in both
+          # are replaced by the overlay version. VCS and CI metadata are
+          # excluded so the chromium checkout stays intact.
+          rsync -a --exclude '.git' --exclude '.github' \
+            "$GITHUB_WORKSPACE/overlay/" "$GITHUB_WORKSPACE/cr/src/"
+
+      - name: Generate signing key
+        run: |
+          set -eux
+          # args.gn points at ../../keystore.jks relative to out/android_arm64,
+          # which resolves to the Chromium source root.
+          keytool -genkeypair -v \
+            -keystore "$GITHUB_WORKSPACE/cr/src/keystore.jks" \
+            -alias dev -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass public_password -keypass public_password \
+            -dname "cn=panxcz-browser (unverified), ou=Actions, o=panxcz-browser, c=GitHub"
 
       - name: Generate build files
         run: |
           set -eux
-          export PATH="$PWD/depot_tools:$PATH"
-          mkdir -p chromium/out/android_arm64
-          cp overlay/.build/production_build_reference/args.gn \
-            chromium/out/android_arm64/args.gn
-          cd chromium
+          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
+          cd "$GITHUB_WORKSPACE/cr/src"
+          mkdir -p out/android_arm64
+          cp "$GITHUB_WORKSPACE/overlay/.build/production_build_reference/args.gn" \
+            out/android_arm64/args.gn
           gn gen out/android_arm64
 
       - name: Build APK
         run: |
           set -eux
-          export PATH="$PWD/depot_tools:$PATH"
+          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
           export NINJA_STATUS='[%f/%t %e] '
-          cd chromium
-          ninja -C out/android_arm64 -j"$(nproc)" chrome_public_apk
+          cd "$GITHUB_WORKSPACE/cr/src"
+          autoninja -C out/android_arm64 -j"$(nproc)" chrome_public_apk
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: panxcz-browser-arm64
-          path: chromium/out/android_arm64/apks/*.apk
+          path: cr/src/out/android_arm64/apks/*.apk
           if-no-files-found: error
           retention-days: 14
