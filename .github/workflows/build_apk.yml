@@ -134,6 +134,23 @@ jobs:
           rsync -a --exclude '.git' --exclude '.github' \
             "$GITHUB_WORKSPACE/overlay/" "$GITHUB_WORKSPACE/cr/src/"
 
+      - name: Patch upstream for mobile extensions
+        run: |
+          set -eux
+          cd "$GITHUB_WORKSPACE/cr/src"
+          # Kiwi enables extensions on Android, so it uses GuestViews on
+          # mobile. Upstream guards against that with an assert whose own
+          # comment says to remove it if GuestViews are used on mobile:
+          #   "If you're now using GuestViews on mobile, go ahead and remove
+          #    this assert."
+          # Without this, gn gen fails at extensions/BUILD.gn:162 which pulls
+          # //components/guest_view/browser:test_support.
+          test -f components/guest_view/browser/BUILD.gn
+          sed -i \
+            's|^assert(!is_android \&\& !is_ios)$|# assert removed: Kiwi uses GuestViews on Android (extensions enabled).|' \
+            components/guest_view/browser/BUILD.gn
+          grep -n "assert removed" components/guest_view/browser/BUILD.gn
+
       - name: Generate signing key
         run: |
           set -eux
